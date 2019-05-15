@@ -1,6 +1,10 @@
 Installation
 ============
 
+.. meta::
+   :description lang=en: Install a local instance of Read the Docs on your own servers with our step by step guide.
+
+
 Here is a step by step guide on how to install Read the Docs.
 It will get you to a point of having a local running instance.
 
@@ -11,6 +15,12 @@ First, obtain `Python 3.6`_ and virtualenv_ if you do not already have them.
 Using a virtual environment is strongly recommended,
 since it will help you to avoid clutter in your system-wide libraries.
 
+.. warning::
+
+    Currently Read the Docs is using ``Django 1.11.x`` and this version of Django
+    has a `bug`_ which breaks database migrations if you are using ``sqlite 3.26.0 or Newer``.
+    So, we recommend using ``sqlite < 3.26.0`` to run Read the Docs properly on your machine.
+
 Additionally Read the Docs depends on:
 
 * `Git`_ (version >=2.17.0)
@@ -19,7 +29,7 @@ Additionally Read the Docs depends on:
 * `Redis`_
 * `Elasticsearch`_ (only if you want full support for searching inside the site)
 
-    * Ubuntu users could install this package by following :doc:`/custom_installs/elasticsearch`.
+    * Follow :doc:`/development/search` documentation for more instruction.
 
 .. note::
 
@@ -30,14 +40,14 @@ In order to get all the dependencies successfully installed,
 you need these libraries.
 
 .. tabs::
-   
+
    .. tab:: Mac OS
 
       If you are having trouble on OS X Mavericks
       (or possibly other versions of OS X) with building ``lxml``,
       you probably might need to use Homebrew_ to ``brew install libxml2``,
       and invoke the install with::
-      
+
           CFLAGS=-I/usr/local/opt/libxml2/include/libxml2 \
           LDFLAGS=-L/usr/local/opt/libxml2/lib \
           pip install -r requirements.txt
@@ -51,7 +61,7 @@ you need these libraries.
          sudo apt-get install libxml2-dev libxslt1-dev zlib1g-dev
 
       If you don't have redis installed yet, you can do it with::
-         
+
          sudo apt-get install redis-server
 
    .. tab:: CentOS/RHEL 7
@@ -74,6 +84,7 @@ you need these libraries.
 .. _Homebrew: http://brew.sh/
 .. _Elasticsearch: https://www.elastic.co/products/elasticsearch
 .. _Redis: https://redis.io/
+.. _bug: https://code.djangoproject.com/ticket/29182
 
 
 Get and run Read the Docs
@@ -81,7 +92,7 @@ Get and run Read the Docs
 
 Clone the repository somewhere on your disk and enter to the repository::
 
-    git clone https://github.com/rtfd/readthedocs.org.git
+    git clone --recurse-submodules https://github.com/rtfd/readthedocs.org.git
     cd readthedocs.org
 
 Create a virtual environment and activate it::
@@ -129,9 +140,9 @@ you can use the admin interface via http://127.0.0.1:8000/admin
 (logging in with the superuser account you just created).
 
 For builds to properly work as expected,
-it is necessary the port you're serving on
+it is necessary that the port you're serving on
 (i.e. ``python manage.py runserver 0.0.0.0:8080``)
-match the port defined in ``PRODUCTION_DOMAIN``.
+matches the port defined in ``PRODUCTION_DOMAIN``.
 You can use ``readthedocs/settings/local_settings.py`` to modify this
 (by default, it's ``localhost:8000``).
 
@@ -143,8 +154,8 @@ For example to update the ``pip`` repo::
 
 .. note::
 
-    If you have problems building successfully a project,
-    probably is because some missing libraries for ``pdf`` and ``epub`` generation.
+    If you have problems building a project successfully,
+    it is probably because of some missing libraries for ``pdf`` and ``epub`` generation.
     You can uncheck this on the advanced settings of your project.
 
 What's available
@@ -165,7 +176,7 @@ See our :doc:`/intro/import-guide` page to learn more.
 Further steps
 -------------
 
-By now you can trigger builds on your local environment, 
+By now you can trigger builds on your local environment,
 to encapsulate the build process inside a Docker container,
 see :doc:`development/buildenvironments`.
 

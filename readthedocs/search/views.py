@@ -1,20 +1,20 @@
 # -*- coding: utf-8 -*-
-"""Search views."""
-from __future__ import (
-    absolute_import, division, print_function, unicode_literals)
 
+"""Search views."""
 import collections
 import logging
-from pprint import pprint
+from pprint import pformat
 
-from django.conf import settings
-from django.shortcuts import render
+from django.shortcuts import get_object_or_404, render
 
 from readthedocs.builds.constants import LATEST
-from readthedocs.search import lib as search_lib
+from readthedocs.projects.models import Project
+from readthedocs.search.faceted_search import (
+    AllSearch, ProjectSearch, PageSearch, DomainSearch, ALL_FACETS
+)
 
 log = logging.getLogger(__name__)
-LOG_TEMPLATE = u'(Elastic Search) [{user}:{type}] [{project}:{version}:{language}] {msg}'
+LOG_TEMPLATE = '(Elastic Search) [%(user)s:%(type)s] [%(project)s:%(version)s:%(language)s] %(msg)s'
 
 UserInput = collections.namedtuple(
     'UserInput',
@@ -25,70 +25,113 @@ UserInput = collections.namedtuple(
         'version',
         'taxonomy',
         'language',
+        'role_name',
+        'index',
     ),
 )
 
 
-def elastic_search(request):
-    """Use Elasticsearch for global search."""
+def elastic_search(request, project_slug=None):
+    """
+    Global user search on the dashboard
+
+    This is for both the main search and project search.
+
+    :param project_slug: Sent when the view is a project search
+    """
+
+    request_type = None
+    if project_slug:
+        queryset = Project.objects.protected(request.user)
+        project_obj = get_object_or_404(queryset, slug=project_slug)
+        request_type = request.GET.get('type', 'file')
+
     user_input = UserInput(
         query=request.GET.get('q'),
-        type=request.GET.get('type', 'project'),
-        project=request.GET.get('project'),
+        type=request_type or request.GET.get('type', 'project'),
+        project=project_slug or request.GET.get('project'),
         version=request.GET.get('version', LATEST),
         taxonomy=request.GET.get('taxonomy'),
         language=request.GET.get('language'),
+        role_name=request.GET.get('role_name'),
+        index=request.GET.get('index'),
     )
-    results = ''
 
+    results = ''
     facets = {}
 
     if user_input.query:
+        kwargs = {}
+
+        for avail_facet in ALL_FACETS:
+            value = getattr(user_input, avail_facet, None)
+            if value:
+                kwargs[avail_facet] = value
+
         if user_input.type == 'project':
-            results = search_lib.search_project(
-                request, user_input.query, language=user_input.language)
+            search = ProjectSearch(
+                query=user_input.query, user=request.user, **kwargs
+            )
+
+        elif user_input.type == 'domain':
+            search = DomainSearch(
+                query=user_input.query, user=request.user, **kwargs
+            )
+
         elif user_input.type == 'file':
-            results = search_lib.search_file(
-                request, user_input.query, project_slug=user_input.project,
-                version_slug=user_input.version, taxonomy=user_input.taxonomy)
+            search = PageSearch(
+                query=user_input.query, user=request.user, **kwargs
+            )
+
+        elif user_input.type == 'all':
+            search = AllSearch(
+                query=user_input.query, user=request.user, **kwargs
+            )
+
+        results = search[:50].execute()
+        facets = results.facets
+
+        log.info(
+            LOG_TEMPLATE,
+            {
+                'user': request.user,
+                'project': user_input.project or '',
+                'type': user_input.type or '',
+                'version': user_input.version or '',
+                'language': user_input.language or '',
+                'msg': user_input.query or '',
+            }
+        )
+
+    # Make sure our selected facets are displayed even when they return 0 results
+    for avail_facet in ALL_FACETS:
+        value = getattr(user_input, avail_facet)
+        if not value or avail_facet not in facets:
+            continue
+        if value not in [val[0] for val in facets[avail_facet]]:
+            facets[avail_facet].insert(0, (value, 0, True))
 
     if results:
-        # pre and post 1.0 compat
-        for num, hit in enumerate(results['hits']['hits']):
-            for key, val in list(hit['fields'].items()):
-                if isinstance(val, list):
-                    results['hits']['hits'][num]['fields'][key] = val[0]
+        if user_input.type == 'file':
+            # Change results to turn newlines in highlight into periods
+            # https://github.com/rtfd/readthedocs.org/issues/5168
+            for result in results:
+                if hasattr(result.meta.highlight, 'content'):
+                    result.meta.highlight.content = [result.replace(
+                        '\n', '. ') for result in result.meta.highlight.content]
 
-        if 'facets' in results:
-            for facet_type in ['project', 'version', 'taxonomy', 'language']:
-                if facet_type in results['facets']:
-                    facets[facet_type] = collections.OrderedDict()
-                    for term in results['facets'][facet_type]['terms']:
-                        facets[facet_type][term['term']] = term['count']
-
-    if settings.DEBUG:
-        print(pprint(results))
-        print(pprint(facets))
-
-    if user_input.query:
-        user = ''
-        if request.user.is_authenticated:
-            user = request.user
-        log.info(
-            LOG_TEMPLATE.format(
-                user=user,
-                project=user_input.project or '',
-                type=user_input.type or '',
-                version=user_input.version or '',
-                language=user_input.language or '',
-                msg=user_input.query or '',
-            ))
+        log.debug('Search results: %s', pformat(results.to_dict()))
+        log.debug('Search facets: %s', pformat(results.facets.to_dict()))
 
     template_vars = user_input._asdict()
     template_vars.update({
         'results': results,
         'facets': facets,
     })
+
+    if project_slug:
+        template_vars.update({'project_obj': project_obj})
+
     return render(
         request,
         'search/elastic_search.html',

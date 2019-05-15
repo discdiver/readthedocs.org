@@ -1,44 +1,52 @@
-# -*- coding: utf-8 -*-
 """Project models."""
-
-from __future__ import (
-    absolute_import, division, print_function, unicode_literals)
 
 import fnmatch
 import logging
 import os
-from builtins import object  # pylint: disable=redefined-builtin
+import re
+from urllib.parse import urlparse
 
 from django.conf import settings
 from django.contrib.auth.models import User
-from django.urls import NoReverseMatch, reverse
+from django.core.files.storage import get_storage_class
 from django.db import models
-from django.utils.encoding import python_2_unicode_compatible
+from django.db.models import Prefetch
+from django.urls import NoReverseMatch, reverse
+from django.utils.functional import cached_property
 from django.utils.translation import ugettext_lazy as _
 from django_extensions.db.models import TimeStampedModel
-from future.backports.urllib.parse import urlparse  # noqa
 from guardian.shortcuts import assign
+from six.moves import shlex_quote
 from taggit.managers import TaggableManager
 
+from readthedocs.api.v2.client import api
 from readthedocs.builds.constants import LATEST, STABLE
 from readthedocs.core.resolver import resolve, resolve_domain
 from readthedocs.core.utils import broadcast, slugify
 from readthedocs.projects import constants
 from readthedocs.projects.exceptions import ProjectConfigurationError
+from readthedocs.projects.managers import HTMLFileManager
 from readthedocs.projects.querysets import (
-    ChildRelatedProjectQuerySet, FeatureQuerySet, ProjectQuerySet,
-    RelatedProjectQuerySet)
+    ChildRelatedProjectQuerySet,
+    FeatureQuerySet,
+    ProjectQuerySet,
+    RelatedProjectQuerySet,
+)
 from readthedocs.projects.templatetags.projects_tags import sort_version_aware
-from readthedocs.projects.validators import validate_domain_name, validate_repository_url
+from readthedocs.projects.validators import (
+    validate_domain_name,
+    validate_repository_url,
+)
 from readthedocs.projects.version_handling import determine_stable_version
-from readthedocs.restapi.client import api
+from readthedocs.search.parse_json import process_file
 from readthedocs.vcs_support.backends import backend_cls
 from readthedocs.vcs_support.utils import Lock, NonBlockingLock
 
+
 log = logging.getLogger(__name__)
+storage = get_storage_class()()
 
 
-@python_2_unicode_compatible
 class ProjectRelationship(models.Model):
 
     """
@@ -47,28 +55,39 @@ class ProjectRelationship(models.Model):
     This is used for subprojects
     """
 
-    parent = models.ForeignKey('Project', verbose_name=_('Parent'),
-                               related_name='subprojects')
-    child = models.ForeignKey('Project', verbose_name=_('Child'),
-                              related_name='superprojects')
-    alias = models.SlugField(_('Alias'), max_length=255, null=True, blank=True, db_index=False)
+    parent = models.ForeignKey(
+        'Project',
+        verbose_name=_('Parent'),
+        related_name='subprojects',
+    )
+    child = models.ForeignKey(
+        'Project',
+        verbose_name=_('Child'),
+        related_name='superprojects',
+    )
+    alias = models.SlugField(
+        _('Alias'),
+        max_length=255,
+        null=True,
+        blank=True,
+        db_index=False,
+    )
 
     objects = ChildRelatedProjectQuerySet.as_manager()
 
     def __str__(self):
-        return '%s -> %s' % (self.parent, self.child)
+        return '{} -> {}'.format(self.parent, self.child)
 
     def save(self, *args, **kwargs):  # pylint: disable=arguments-differ
         if not self.alias:
             self.alias = self.child.slug
-        super(ProjectRelationship, self).save(*args, **kwargs)
+        super().save(*args, **kwargs)
 
     # HACK
     def get_absolute_url(self):
         return resolve(self.child)
 
 
-@python_2_unicode_compatible
 class Project(models.Model):
 
     """Project model."""
@@ -78,113 +97,203 @@ class Project(models.Model):
     modified_date = models.DateTimeField(_('Modified date'), auto_now=True)
 
     # Generally from conf.py
-    users = models.ManyToManyField(User, verbose_name=_('User'),
-                                   related_name='projects')
+    users = models.ManyToManyField(
+        User,
+        verbose_name=_('User'),
+        related_name='projects',
+    )
     # A DNS label can contain up to 63 characters.
     name = models.CharField(_('Name'), max_length=63)
     slug = models.SlugField(_('Slug'), max_length=63, unique=True)
-    description = models.TextField(_('Description'), blank=True,
-                                   help_text=_('The reStructuredText '
-                                               'description of the project'))
-    repo = models.CharField(_('Repository URL'), max_length=255,
-                            validators=[validate_repository_url],
-                            help_text=_('Hosted documentation repository URL'))
-    repo_type = models.CharField(_('Repository type'), max_length=10,
-                                 choices=constants.REPO_CHOICES, default='git')
-    project_url = models.URLField(_('Project homepage'), blank=True,
-                                  help_text=_('The project\'s homepage'))
-    canonical_url = models.URLField(_('Canonical URL'), blank=True,
-                                    help_text=_('URL that documentation is expected to serve from'))
+    description = models.TextField(
+        _('Description'),
+        blank=True,
+        help_text=_(
+            'The reStructuredText '
+            'description of the project',
+        ),
+    )
+    repo = models.CharField(
+        _('Repository URL'),
+        max_length=255,
+        validators=[validate_repository_url],
+        help_text=_('Hosted documentation repository URL'),
+        db_index=True,
+    )
+    repo_type = models.CharField(
+        _('Repository type'),
+        max_length=10,
+        choices=constants.REPO_CHOICES,
+        default='git',
+    )
+    project_url = models.URLField(
+        _('Project homepage'),
+        blank=True,
+        help_text=_('The project\'s homepage'),
+    )
+    canonical_url = models.URLField(
+        _('Canonical URL'),
+        blank=True,
+        help_text=_('URL that documentation is expected to serve from'),
+    )
     single_version = models.BooleanField(
-        _('Single version'), default=False,
-        help_text=_('A single version site has no translations and only your '
-                    '"latest" version, served at the root of the domain. Use '
-                    'this with caution, only turn it on if you will <b>never</b> '
-                    'have multiple versions of your docs.'))
+        _('Single version'),
+        default=False,
+        help_text=_(
+            'A single version site has no translations and only your '
+            '"latest" version, served at the root of the domain. Use '
+            'this with caution, only turn it on if you will <b>never</b> '
+            'have multiple versions of your docs.',
+        ),
+    )
     default_version = models.CharField(
-        _('Default version'), max_length=255, default=LATEST,
-        help_text=_('The version of your project that / redirects to'))
+        _('Default version'),
+        max_length=255,
+        default=LATEST,
+        help_text=_('The version of your project that / redirects to'),
+    )
     # In default_branch, None means the backend should choose the
     # appropriate branch. Eg 'master' for git
     default_branch = models.CharField(
-        _('Default branch'), max_length=255, default=None, null=True,
-        blank=True, help_text=_('What branch "latest" points to. Leave empty '
-                                'to use the default value for your VCS (eg. '
-                                '<code>trunk</code> or <code>master</code>).'))
+        _('Default branch'),
+        max_length=255,
+        default=None,
+        null=True,
+        blank=True,
+        help_text=_(
+            'What branch "latest" points to. Leave empty '
+            'to use the default value for your VCS (eg. '
+            '<code>trunk</code> or <code>master</code>).',
+        ),
+    )
     requirements_file = models.CharField(
-        _('Requirements file'), max_length=255, default=None, null=True,
-        blank=True, help_text=_(
+        _('Requirements file'),
+        max_length=255,
+        default=None,
+        null=True,
+        blank=True,
+        help_text=_(
             'A <a '
             'href="https://pip.pypa.io/en/latest/user_guide.html#requirements-files">'
             'pip requirements file</a> needed to build your documentation. '
-            'Path from the root of your project.'))
+            'Path from the root of your project.',
+        ),
+    )
     documentation_type = models.CharField(
-        _('Documentation type'), max_length=20,
-        choices=constants.DOCUMENTATION_CHOICES, default='sphinx',
-        help_text=_('Type of documentation you are building. <a href="'
-                    'http://www.sphinx-doc.org/en/stable/builders.html#sphinx.builders.html.'
-                    'DirectoryHTMLBuilder">More info</a>.'))
+        _('Documentation type'),
+        max_length=20,
+        choices=constants.DOCUMENTATION_CHOICES,
+        default='sphinx',
+        help_text=_(
+            'Type of documentation you are building. <a href="'
+            'http://www.sphinx-doc.org/en/stable/builders.html#sphinx.builders.html.'
+            'DirectoryHTMLBuilder">More info on sphinx builders</a>.',
+        ),
+    )
 
     # Project features
     cdn_enabled = models.BooleanField(_('CDN Enabled'), default=False)
     analytics_code = models.CharField(
-        _('Analytics code'), max_length=50, null=True, blank=True,
-        help_text=_('Google Analytics Tracking ID '
-                    '(ex. <code>UA-22345342-1</code>). '
-                    'This may slow down your page loads.'))
+        _('Analytics code'),
+        max_length=50,
+        null=True,
+        blank=True,
+        help_text=_(
+            'Google Analytics Tracking ID '
+            '(ex. <code>UA-22345342-1</code>). '
+            'This may slow down your page loads.',
+        ),
+    )
     container_image = models.CharField(
-        _('Alternative container image'), max_length=64, null=True, blank=True)
+        _('Alternative container image'),
+        max_length=64,
+        null=True,
+        blank=True,
+    )
     container_mem_limit = models.CharField(
-        _('Container memory limit'), max_length=10, null=True, blank=True,
-        help_text=_('Memory limit in Docker format '
-                    '-- example: <code>512m</code> or <code>1g</code>'))
+        _('Container memory limit'),
+        max_length=10,
+        null=True,
+        blank=True,
+        help_text=_(
+            'Memory limit in Docker format '
+            '-- example: <code>512m</code> or <code>1g</code>',
+        ),
+    )
     container_time_limit = models.IntegerField(
         _('Container time limit in seconds'),
         null=True,
         blank=True,
     )
     build_queue = models.CharField(
-        _('Alternate build queue id'), max_length=32, null=True, blank=True)
+        _('Alternate build queue id'),
+        max_length=32,
+        null=True,
+        blank=True,
+    )
     allow_promos = models.BooleanField(
-        _('Allow paid advertising'), default=True, help_text=_(
-            'If unchecked, users will still see community ads.'))
+        _('Allow paid advertising'),
+        default=True,
+        help_text=_('If unchecked, users will still see community ads.'),
+    )
     ad_free = models.BooleanField(
         _('Ad-free'),
         default=False,
         help_text='If checked, do not show advertising for this project',
     )
     show_version_warning = models.BooleanField(
-        _('Show version warning'), default=False,
-        help_text=_('Show warning banner in non-stable nor latest versions.')
+        _('Show version warning'),
+        default=False,
+        help_text=_('Show warning banner in non-stable nor latest versions.'),
     )
 
     # Sphinx specific build options.
     enable_epub_build = models.BooleanField(
-        _('Enable EPUB build'), default=True,
+        _('Enable EPUB build'),
+        default=True,
         help_text=_(
-            'Create a EPUB version of your documentation with each build.'))
+            'Create a EPUB version of your documentation with each build.',
+        ),
+    )
     enable_pdf_build = models.BooleanField(
-        _('Enable PDF build'), default=True,
+        _('Enable PDF build'),
+        default=True,
         help_text=_(
-            'Create a PDF version of your documentation with each build.'))
+            'Create a PDF version of your documentation with each build.',
+        ),
+    )
 
     # Other model data.
-    path = models.CharField(_('Path'), max_length=255, editable=False,
-                            help_text=_('The directory where '
-                                        '<code>conf.py</code> lives'))
+    path = models.CharField(
+        _('Path'),
+        max_length=255,
+        editable=False,
+        help_text=_(
+            'The directory where '
+            '<code>conf.py</code> lives',
+        ),
+    )
     conf_py_file = models.CharField(
-        _('Python configuration file'), max_length=255, default='', blank=True,
-        help_text=_('Path from project root to <code>conf.py</code> file '
-                    '(ex. <code>docs/conf.py</code>). '
-                    'Leave blank if you want us to find it for you.'))
+        _('Python configuration file'),
+        max_length=255,
+        default='',
+        blank=True,
+        help_text=_(
+            'Path from project root to <code>conf.py</code> file '
+            '(ex. <code>docs/conf.py</code>). '
+            'Leave blank if you want us to find it for you.',
+        ),
+    )
 
     featured = models.BooleanField(_('Featured'), default=False)
     skip = models.BooleanField(_('Skip'), default=False)
     install_project = models.BooleanField(
         _('Install Project'),
-        help_text=_('Install your project inside a virtualenv using <code>setup.py '
-                    'install</code>'),
-        default=False
+        help_text=_(
+            'Install your project inside a virtualenv using <code>setup.py '
+            'install</code>',
+        ),
+        default=False,
     )
 
     # This model attribute holds the python interpreter used to create the
@@ -193,65 +302,97 @@ class Project(models.Model):
         _('Python Interpreter'),
         max_length=20,
         choices=constants.PYTHON_CHOICES,
-        default='python',
-        help_text=_('The Python interpreter used to create the virtual '
-                    'environment.'))
+        default='python3',
+        help_text=_(
+            'The Python interpreter used to create the virtual '
+            'environment.',
+        ),
+    )
 
     use_system_packages = models.BooleanField(
         _('Use system packages'),
-        help_text=_('Give the virtual environment access to the global '
-                    'site-packages dir.'),
-        default=False
+        help_text=_(
+            'Give the virtual environment access to the global '
+            'site-packages dir.',
+        ),
+        default=False,
     )
     privacy_level = models.CharField(
-        _('Privacy Level'), max_length=20, choices=constants.PRIVACY_CHOICES,
-        default=getattr(settings, 'DEFAULT_PRIVACY_LEVEL', 'public'),
-        help_text=_('Level of privacy that you want on the repository. '
-                    'Protected means public but not in listings.'))
+        _('Privacy Level'),
+        max_length=20,
+        choices=constants.PRIVACY_CHOICES,
+        default=settings.DEFAULT_PRIVACY_LEVEL,
+        help_text=_(
+            'Level of privacy that you want on the repository. '
+            'Protected means public but not in listings.',
+        ),
+    )
     version_privacy_level = models.CharField(
-        _('Version Privacy Level'), max_length=20,
-        choices=constants.PRIVACY_CHOICES, default=getattr(
-            settings, 'DEFAULT_PRIVACY_LEVEL', 'public'),
-        help_text=_('Default level of privacy you want on built '
-                    'versions of documentation.'))
+        _('Version Privacy Level'),
+        max_length=20,
+        choices=constants.PRIVACY_CHOICES,
+        default=settings.DEFAULT_PRIVACY_LEVEL,
+        help_text=_(
+            'Default level of privacy you want on built '
+            'versions of documentation.',
+        ),
+    )
 
     # Subprojects
     related_projects = models.ManyToManyField(
-        'self', verbose_name=_('Related projects'), blank=True,
-        symmetrical=False, through=ProjectRelationship)
+        'self',
+        verbose_name=_('Related projects'),
+        blank=True,
+        symmetrical=False,
+        through=ProjectRelationship,
+    )
 
     # Language bits
-    language = models.CharField(_('Language'), max_length=20, default='en',
-                                help_text=_('The language the project '
-                                            'documentation is rendered in. '
-                                            "Note: this affects your project's URL."),
-                                choices=constants.LANGUAGES)
+    language = models.CharField(
+        _('Language'),
+        max_length=20,
+        default='en',
+        help_text=_(
+            'The language the project '
+            'documentation is rendered in. '
+            "Note: this affects your project's URL.",
+        ),
+        choices=constants.LANGUAGES,
+    )
 
     programming_language = models.CharField(
         _('Programming Language'),
         max_length=20,
         default='words',
         help_text=_(
-            'The primary programming language the project is written in.'),
-        choices=constants.PROGRAMMING_LANGUAGES, blank=True)
+            'The primary programming language the project is written in.',
+        ),
+        choices=constants.PROGRAMMING_LANGUAGES,
+        blank=True,
+    )
     # A subproject pointed at its main language, so it can be tracked
-    main_language_project = models.ForeignKey('self',
-                                              related_name='translations',
-                                              on_delete=models.SET_NULL,
-                                              blank=True, null=True)
+    main_language_project = models.ForeignKey(
+        'self',
+        related_name='translations',
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+    )
 
     has_valid_webhook = models.BooleanField(
-        default=False, help_text=_('This project has been built with a webhook')
+        default=False,
+        help_text=_('This project has been built with a webhook'),
     )
     has_valid_clone = models.BooleanField(
-        default=False, help_text=_('This project has been successfully cloned')
+        default=False,
+        help_text=_('This project has been successfully cloned'),
     )
 
     tags = TaggableManager(blank=True)
     objects = ProjectQuerySet.as_manager()
     all_objects = models.Manager()
 
-    class Meta(object):
+    class Meta:
         ordering = ('slug',)
         permissions = (
             # Translators: Permission around whether a user can view the
@@ -270,12 +411,7 @@ class Project(models.Model):
             self.slug = slugify(self.name)
             if not self.slug:
                 raise Exception(_('Model must have slug'))
-        if self.documentation_type == 'auto':
-            # This used to determine the type and automatically set the
-            # documentation type to Sphinx for rST and Mkdocs for markdown.
-            # It now just forces Sphinx, due to markdown support.
-            self.documentation_type = 'sphinx'
-        super(Project, self).save(*args, **kwargs)
+        super().save(*args, **kwargs)
         for owner in self.users.all():
             assign('view_project', owner, self)
         try:
@@ -314,7 +450,10 @@ class Project(models.Model):
         try:
             if not first_save:
                 broadcast(
-                    type='app', task=tasks.update_static_metadata, args=[self.pk],)
+                    type='app',
+                    task=tasks.update_static_metadata,
+                    args=[self.pk],
+                )
         except Exception:
             log.exception('failed to update static metadata')
         try:
@@ -333,15 +472,23 @@ class Project(models.Model):
 
         Always use http for now, to avoid content warnings.
         """
-        return resolve(project=self, version_slug=version_slug, language=lang_slug, private=private)
+        return resolve(
+            project=self,
+            version_slug=version_slug,
+            language=lang_slug,
+            private=private,
+        )
 
     def get_builds_url(self):
-        return reverse('builds_project_list', kwargs={
-            'project_slug': self.slug,
-        })
+        return reverse(
+            'builds_project_list',
+            kwargs={
+                'project_slug': self.slug,
+            },
+        )
 
     def get_canonical_url(self):
-        if getattr(settings, 'DONT_HIT_DB', True):
+        if settings.DONT_HIT_DB:
             return api.project(self.pk).canonical_url().get()['url']
         return self.get_docs_url()
 
@@ -351,14 +498,35 @@ class Project(models.Model):
 
         This is used in search result linking
         """
-        if getattr(settings, 'DONT_HIT_DB', True):
-            return [(proj['slug'], proj['canonical_url'])
-                    for proj in (
-                        api.project(self.pk)
-                        .subprojects()
-                        .get()['subprojects'])]
+        if settings.DONT_HIT_DB:
+            return [(proj['slug'], proj['canonical_url']) for proj in
+                    (api.project(self.pk).subprojects().get()['subprojects'])]
         return [(proj.child.slug, proj.child.get_docs_url())
                 for proj in self.subprojects.all()]
+
+    def get_storage_path(self, type_, version_slug=LATEST, include_file=True):
+        """
+        Get a path to a build artifact for use with Django's storage system.
+
+        :param type_: Media content type, ie - 'pdf', 'htmlzip'
+        :param version_slug: Project version slug for lookup
+        :param include_file: Include file name in return
+        :return: the path to an item in storage
+            (can be used with ``storage.url`` to get the URL)
+        """
+        folder_path = '{}/{}/{}'.format(
+            type_,
+            self.slug,
+            version_slug,
+        )
+        if include_file:
+            extension = type_.replace('htmlzip', 'zip')
+            return '{}/{}.{}'.format(
+                folder_path,
+                self.slug,
+                extension,
+            )
+        return folder_path
 
     def get_production_media_path(self, type_, version_slug, include_file=True):
         """
@@ -371,29 +539,42 @@ class Project(models.Model):
 
         :returns: Full path to media file or path
         """
-        if getattr(settings, 'DEFAULT_PRIVACY_LEVEL', 'public') == 'public' or settings.DEBUG:
+        if settings.DEFAULT_PRIVACY_LEVEL == 'public' or settings.DEBUG:
             path = os.path.join(
-                settings.MEDIA_ROOT, type_, self.slug, version_slug)
+                settings.MEDIA_ROOT,
+                type_,
+                self.slug,
+                version_slug,
+            )
         else:
             path = os.path.join(
-                settings.PRODUCTION_MEDIA_ARTIFACTS, type_, self.slug, version_slug)
+                settings.PRODUCTION_MEDIA_ARTIFACTS,
+                type_,
+                self.slug,
+                version_slug,
+            )
         if include_file:
             path = os.path.join(
-                path, '%s.%s' % (self.slug, type_.replace('htmlzip', 'zip')))
+                path,
+                '{}.{}'.format(self.slug, type_.replace('htmlzip', 'zip')),
+            )
         return path
 
     def get_production_media_url(self, type_, version_slug, full_path=True):
         """Get the URL for downloading a specific media file."""
         try:
-            path = reverse('project_download_media', kwargs={
-                'project_slug': self.slug,
-                'type_': type_,
-                'version_slug': version_slug,
-            })
+            path = reverse(
+                'project_download_media',
+                kwargs={
+                    'project_slug': self.slug,
+                    'type_': type_,
+                    'version_slug': version_slug,
+                },
+            )
         except NoReverseMatch:
             return ''
         if full_path:
-            path = '//%s%s' % (settings.PRODUCTION_DOMAIN, path)
+            path = '//{}{}'.format(settings.PRODUCTION_DOMAIN, path)
         return path
 
     def subdomain(self):
@@ -403,11 +584,17 @@ class Project(models.Model):
     def get_downloads(self):
         downloads = {}
         downloads['htmlzip'] = self.get_production_media_url(
-            'htmlzip', self.get_default_version())
+            'htmlzip',
+            self.get_default_version(),
+        )
         downloads['epub'] = self.get_production_media_url(
-            'epub', self.get_default_version())
+            'epub',
+            self.get_default_version(),
+        )
         downloads['pdf'] = self.get_production_media_url(
-            'pdf', self.get_default_version())
+            'pdf',
+            self.get_default_version(),
+        )
         return downloads
 
     @property
@@ -429,7 +616,7 @@ class Project(models.Model):
     @property
     def pip_cache_path(self):
         """Path to pip cache."""
-        if getattr(settings, 'GLOBAL_PIP_CACHE', False) and settings.DEBUG:
+        if settings.GLOBAL_PIP_CACHE and settings.DEBUG:
             return settings.GLOBAL_PIP_CACHE
         return os.path.join(self.doc_path, '.cache', 'pip')
 
@@ -485,11 +672,8 @@ class Project(models.Model):
 
     def full_json_path(self, version=LATEST):
         """The path to the build json docs in the project."""
-        if 'sphinx' in self.documentation_type:
-            return os.path.join(self.conf_dir(version), '_build', 'json')
-
-        if 'mkdocs' in self.documentation_type:
-            return os.path.join(self.checkout_path(version), '_build', 'json')
+        json_path = os.path.join(self.conf_dir(version), '_build', 'json')
+        return json_path
 
     def full_singlehtml_path(self, version=LATEST):
         """The path to the build singlehtml docs in the project."""
@@ -507,7 +691,9 @@ class Project(models.Model):
         """Find a ``conf.py`` file in the project checkout."""
         if self.conf_py_file:
             conf_path = os.path.join(
-                self.checkout_path(version), self.conf_py_file,)
+                self.checkout_path(version),
+                self.conf_py_file,
+            )
 
             if os.path.exists(conf_path):
                 log.info('Inserting conf.py file path from model')
@@ -530,12 +716,10 @@ class Project(models.Model):
         # the `doc` word in the path, we raise an error informing this to the user
         if len(files) > 1:
             raise ProjectConfigurationError(
-                ProjectConfigurationError.MULTIPLE_CONF_FILES
+                ProjectConfigurationError.MULTIPLE_CONF_FILES,
             )
 
-        raise ProjectConfigurationError(
-            ProjectConfigurationError.NOT_FOUND
-        )
+        raise ProjectConfigurationError(ProjectConfigurationError.NOT_FOUND)
 
     def conf_dir(self, version=LATEST):
         conf_file = self.conf_file(version)
@@ -548,6 +732,10 @@ class Project(models.Model):
 
     @property
     def has_good_build(self):
+        # Check if there is `_good_build` annotation in the Queryset.
+        # Used for Database optimization.
+        if hasattr(self, '_good_build'):
+            return self._good_build
         return self.builds.filter(success=True).exists()
 
     @property
@@ -559,20 +747,31 @@ class Project(models.Model):
         return self.aliases.exists()
 
     def has_pdf(self, version_slug=LATEST):
-        if not self.enable_pdf_build:
-            return False
-        return os.path.exists(self.get_production_media_path(
-            type_='pdf', version_slug=version_slug))
+        path = self.get_production_media_path(
+            type_='pdf', version_slug=version_slug
+        )
+        storage_path = self.get_storage_path(
+            type_='pdf', version_slug=version_slug
+        )
+        return os.path.exists(path) or storage.exists(storage_path)
 
     def has_epub(self, version_slug=LATEST):
-        if not self.enable_epub_build:
-            return False
-        return os.path.exists(self.get_production_media_path(
-            type_='epub', version_slug=version_slug))
+        path = self.get_production_media_path(
+            type_='epub', version_slug=version_slug
+        )
+        storage_path = self.get_storage_path(
+            type_='epub', version_slug=version_slug
+        )
+        return os.path.exists(path) or storage.exists(storage_path)
 
     def has_htmlzip(self, version_slug=LATEST):
-        return os.path.exists(self.get_production_media_path(
-            type_='htmlzip', version_slug=version_slug))
+        path = self.get_production_media_path(
+            type_='htmlzip', version_slug=version_slug
+        )
+        storage_path = self.get_storage_path(
+            type_='htmlzip', version_slug=version_slug
+        )
+        return os.path.exists(path) or storage.exists(storage_path)
 
     @property
     def sponsored(self):
@@ -611,8 +810,8 @@ class Project(models.Model):
         if max_lock_age is None:
             max_lock_age = (
                 self.container_time_limit or
-                getattr(settings, 'DOCKER_LIMITS', {}).get('time') or
-                getattr(settings, 'REPO_LOCK_SECONDS', 30)
+                settings.DOCKER_LIMITS.get('time') or
+                settings.REPO_LOCK_SECONDS
             )
 
         return NonBlockingLock(
@@ -656,6 +855,13 @@ class Project(models.Model):
 
         :param finished: Return only builds that are in a finished state
         """
+        # Check if there is `_latest_build` attribute in the Queryset.
+        # Used for Database optimization.
+        if hasattr(self, '_latest_build'):
+            if self._latest_build:
+                return self._latest_build[0]
+            return None
+
         kwargs = {'type': 'html'}
         if finished:
             kwargs['state'] = 'finished'
@@ -664,7 +870,8 @@ class Project(models.Model):
     def api_versions(self):
         from readthedocs.builds.models import APIVersion
         ret = []
-        for version_data in api.project(self.pk).active_versions.get()['versions']:
+        for version_data in api.project(self.pk
+                                        ).active_versions.get()['versions']:
             version = APIVersion(**version_data)
             ret.append(version)
         return sort_version_aware(ret)
@@ -672,8 +879,10 @@ class Project(models.Model):
     def active_versions(self):
         from readthedocs.builds.models import Version
         versions = Version.objects.public(project=self, only_active=True)
-        return (versions.filter(built=True, active=True) |
-                versions.filter(active=True, uploaded=True))
+        return (
+            versions.filter(built=True, active=True) |
+            versions.filter(active=True, uploaded=True)
+        )
 
     def ordered_active_versions(self, user=None):
         from readthedocs.builds.models import Version
@@ -683,7 +892,21 @@ class Project(models.Model):
         }
         if user:
             kwargs['user'] = user
-        versions = Version.objects.public(**kwargs)
+        versions = Version.objects.public(**kwargs).select_related(
+            'project',
+            'project__main_language_project',
+        ).prefetch_related(
+            Prefetch(
+                'project__superprojects',
+                ProjectRelationship.objects.all().select_related('parent'),
+                to_attr='_superprojects',
+            ),
+            Prefetch(
+                'project__domains',
+                Domain.objects.filter(canonical=True),
+                to_attr='_canonical_domains',
+            ),
+        )
         return sort_version_aware(versions)
 
     def all_active_versions(self):
@@ -714,23 +937,31 @@ class Project(models.Model):
             current_stable = self.get_stable_version()
             if current_stable:
                 identifier_updated = (
-                    new_stable.identifier != current_stable.identifier)
-                if identifier_updated and current_stable.active and current_stable.machine:
+                    new_stable.identifier != current_stable.identifier
+                )
+                if identifier_updated and current_stable.machine:
                     log.info(
-                        'Update stable version: {project}:{version}'.format(
-                            project=self.slug,
-                            version=new_stable.identifier))
+                        'Update stable version: %(project)s:%(version)s',
+                        {
+                            'project': self.slug,
+                            'version': new_stable.identifier,
+                        }
+                    )
                     current_stable.identifier = new_stable.identifier
                     current_stable.save()
                     return new_stable
             else:
                 log.info(
-                    'Creating new stable version: {project}:{version}'.format(
-                        project=self.slug,
-                        version=new_stable.identifier))
+                    'Creating new stable version: %(project)s:%(version)s',
+                    {
+                        'project': self.slug,
+                        'version': new_stable.identifier,
+                    }
+                )
                 current_stable = self.versions.create_stable(
                     type=new_stable.type,
-                    identifier=new_stable.identifier)
+                    identifier=new_stable.identifier,
+                )
                 return new_stable
 
     def versions_from_branch_name(self, branch):
@@ -753,7 +984,8 @@ class Project(models.Model):
             return self.default_version
         # check if the default_version exists
         version_qs = self.versions.filter(
-            slug=self.default_version, active=True
+            slug=self.default_version,
+            active=True,
         )
         if version_qs.exists():
             return self.default_version
@@ -767,12 +999,34 @@ class Project(models.Model):
 
     def add_subproject(self, child, alias=None):
         subproject, __ = ProjectRelationship.objects.get_or_create(
-            parent=self, child=child, alias=alias,
+            parent=self,
+            child=child,
+            alias=alias,
         )
         return subproject
 
     def remove_subproject(self, child):
         ProjectRelationship.objects.filter(parent=self, child=child).delete()
+
+    def get_parent_relationship(self):
+        """Get the parent project relationship or None if this is a top level project"""
+        if hasattr(self, '_superprojects'):
+            # Cached parent project relationship
+            if self._superprojects:
+                return self._superprojects[0]
+            return None
+
+        return self.superprojects.select_related('parent').first()
+
+    def get_canonical_custom_domain(self):
+        """Get the canonical custom domain or None."""
+        if hasattr(self, '_canonical_domains'):
+            # Cached custom domains
+            if self._canonical_domains:
+                return self._canonical_domains[0]
+            return None
+
+        return self.domains.filter(canonical=True).first()
 
     @property
     def features(self):
@@ -800,7 +1054,7 @@ class Project(models.Model):
     @property
     def show_advertising(self):
         """
-        Whether this project is ad-free
+        Whether this project is ad-free.
 
         :returns: ``True`` if advertising should be shown and ``False`` otherwise
         :rtype: bool
@@ -856,7 +1110,7 @@ class APIProject(Project):
                 del kwargs[key]
             except KeyError:
                 pass
-        super(APIProject, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
         # Overwrite the database property with the value from the API
         self.ad_free = ad_free
@@ -878,7 +1132,6 @@ class APIProject(Project):
         return self._environment_variables
 
 
-@python_2_unicode_compatible
 class ImportedFile(models.Model):
 
     """
@@ -888,34 +1141,106 @@ class ImportedFile(models.Model):
     things like CDN invalidation.
     """
 
-    project = models.ForeignKey('Project', verbose_name=_('Project'),
-                                related_name='imported_files')
-    version = models.ForeignKey('builds.Version', verbose_name=_('Version'),
-                                related_name='imported_files', null=True)
+    project = models.ForeignKey(
+        'Project',
+        verbose_name=_('Project'),
+        related_name='imported_files',
+    )
+    version = models.ForeignKey(
+        'builds.Version',
+        verbose_name=_('Version'),
+        related_name='imported_files',
+        null=True,
+    )
     name = models.CharField(_('Name'), max_length=255)
     slug = models.SlugField(_('Slug'))
-    path = models.CharField(_('Path'), max_length=255)
+
+    # max_length is set to 4096 because linux has a maximum path length
+    # of 4096 characters for most filesystems (including EXT4).
+    # https://github.com/rtfd/readthedocs.org/issues/5061
+    path = models.CharField(_('Path'), max_length=4096)
     md5 = models.CharField(_('MD5 checksum'), max_length=255)
     commit = models.CharField(_('Commit'), max_length=255)
     modified_date = models.DateTimeField(_('Modified date'), auto_now=True)
 
     def get_absolute_url(self):
-        return resolve(project=self.project, version_slug=self.version.slug, filename=self.path)
+        return resolve(
+            project=self.project,
+            version_slug=self.version.slug,
+            filename=self.path,
+        )
 
     def __str__(self):
-        return '%s: %s' % (self.name, self.project)
+        return '{}: {}'.format(self.name, self.project)
+
+
+class HTMLFile(ImportedFile):
+
+    """
+    Imported HTML file Proxy model.
+
+    This tracks only the HTML files for indexing to search.
+    """
+
+    class Meta:
+        proxy = True
+
+    objects = HTMLFileManager()
+
+    def get_processed_json(self):
+        """
+        Get the parsed JSON for search indexing.
+
+        Check for two paths for each index file
+        This is because HTMLDir can generate a file from two different places:
+
+        * foo.rst
+        * foo/index.rst
+
+        Both lead to `foo/index.html`
+        https://github.com/rtfd/readthedocs.org/issues/5368
+        """
+        paths = []
+        basename = os.path.splitext(self.path)[0]
+        paths.append(basename + '.fjson')
+        if basename.endswith('/index'):
+            new_basename = re.sub(r'\/index$', '', basename)
+            paths.append(new_basename + '.fjson')
+
+        full_json_path = self.project.get_production_media_path(
+            type_='json', version_slug=self.version.slug, include_file=False
+        )
+        try:
+            for path in paths:
+                file_path = os.path.join(full_json_path, path)
+                if os.path.exists(file_path):
+                    return process_file(file_path)
+        except Exception:
+            log.warning(
+                'Unhandled exception during search processing file: %s',
+                file_path,
+            )
+        return {
+            'headers': [],
+            'content': '',
+            'path': file_path,
+            'title': '',
+            'sections': [],
+        }
+
+    @cached_property
+    def processed_json(self):
+        return self.get_processed_json()
 
 
 class Notification(models.Model):
-    project = models.ForeignKey(Project,
-                                related_name='%(class)s_notifications')
+    project = models.ForeignKey(Project, related_name='%(class)s_notifications')
     objects = RelatedProjectQuerySet.as_manager()
 
-    class Meta(object):
+    class Meta:
         abstract = True
 
 
-@python_2_unicode_compatible
 class EmailHook(Notification):
     email = models.EmailField()
 
@@ -923,50 +1248,63 @@ class EmailHook(Notification):
         return self.email
 
 
-@python_2_unicode_compatible
 class WebHook(Notification):
-    url = models.URLField(max_length=600, blank=True,
-                          help_text=_('URL to send the webhook to'))
+    url = models.URLField(
+        max_length=600,
+        blank=True,
+        help_text=_('URL to send the webhook to'),
+    )
 
     def __str__(self):
         return self.url
 
 
-@python_2_unicode_compatible
 class Domain(models.Model):
 
     """A custom domain name for a project."""
 
     project = models.ForeignKey(Project, related_name='domains')
-    domain = models.CharField(_('Domain'), unique=True, max_length=255,
-                              validators=[validate_domain_name])
+    domain = models.CharField(
+        _('Domain'),
+        unique=True,
+        max_length=255,
+        validators=[validate_domain_name],
+    )
     machine = models.BooleanField(
-        default=False, help_text=_('This Domain was auto-created')
+        default=False,
+        help_text=_('This Domain was auto-created'),
     )
     cname = models.BooleanField(
-        default=False, help_text=_('This Domain is a CNAME for the project')
+        default=False,
+        help_text=_('This Domain is a CNAME for the project'),
     )
     canonical = models.BooleanField(
         default=False,
         help_text=_(
             'This Domain is the primary one where the documentation is '
-            'served from')
+            'served from',
+        ),
     )
     https = models.BooleanField(
         _('Use HTTPS'),
         default=False,
-        help_text=_('Always use HTTPS for this domain')
+        help_text=_('Always use HTTPS for this domain'),
     )
-    count = models.IntegerField(default=0, help_text=_(
-        'Number of times this domain has been hit'),)
+    count = models.IntegerField(
+        default=0,
+        help_text=_('Number of times this domain has been hit'),
+    )
 
     objects = RelatedProjectQuerySet.as_manager()
 
-    class Meta(object):
+    class Meta:
         ordering = ('-canonical', '-machine', 'domain')
 
     def __str__(self):
-        return '{domain} pointed at {project}'.format(domain=self.domain, project=self.project.name)
+        return '{domain} pointed at {project}'.format(
+            domain=self.domain,
+            project=self.project.name,
+        )
 
     def save(self, *args, **kwargs):  # pylint: disable=arguments-differ
         from readthedocs.projects import tasks
@@ -975,18 +1313,23 @@ class Domain(models.Model):
             self.domain = parsed.netloc
         else:
             self.domain = parsed.path
-        super(Domain, self).save(*args, **kwargs)
-        broadcast(type='app', task=tasks.symlink_domain,
-                  args=[self.project.pk, self.pk],)
+        super().save(*args, **kwargs)
+        broadcast(
+            type='app',
+            task=tasks.symlink_domain,
+            args=[self.project.pk, self.domain],
+        )
 
     def delete(self, *args, **kwargs):  # pylint: disable=arguments-differ
         from readthedocs.projects import tasks
-        broadcast(type='app', task=tasks.symlink_domain,
-                  args=[self.project.pk, self.pk, True],)
-        super(Domain, self).delete(*args, **kwargs)
+        broadcast(
+            type='app',
+            task=tasks.symlink_domain,
+            args=[self.project.pk, self.domain, True],
+        )
+        super().delete(*args, **kwargs)
 
 
-@python_2_unicode_compatible
 class Feature(models.Model):
 
     """
@@ -1006,28 +1349,54 @@ class Feature(models.Model):
     # Feature constants - this is not a exhaustive list of features, features
     # may be added by other packages
     USE_SPHINX_LATEST = 'use_sphinx_latest'
-    USE_SETUPTOOLS_LATEST = 'use_setuptools_latest'
     ALLOW_DEPRECATED_WEBHOOKS = 'allow_deprecated_webhooks'
     PIP_ALWAYS_UPGRADE = 'pip_always_upgrade'
     SKIP_SUBMODULES = 'skip_submodules'
     DONT_OVERWRITE_SPHINX_CONTEXT = 'dont_overwrite_sphinx_context'
-    ALLOW_V2_CONFIG_FILE = 'allow_v2_config_file'
     MKDOCS_THEME_RTD = 'mkdocs_theme_rtd'
+    API_LARGE_DATA = 'api_large_data'
     DONT_SHALLOW_CLONE = 'dont_shallow_clone'
+    USE_TESTING_BUILD_IMAGE = 'use_testing_build_image'
+    SHARE_SPHINX_DOCTREE = 'share_sphinx_doctree'
+    USE_PDF_LATEXMK = 'use_pdf_latexmk'
+    DEFAULT_TO_MKDOCS_0_17_3 = 'default_to_mkdocs_0_17_3'
 
     FEATURES = (
         (USE_SPHINX_LATEST, _('Use latest version of Sphinx')),
-        (USE_SETUPTOOLS_LATEST, _('Use latest version of setuptools')),
+        (USE_PDF_LATEXMK, _('Use latexmk to build the PDF')),
         (ALLOW_DEPRECATED_WEBHOOKS, _('Allow deprecated webhook views')),
         (PIP_ALWAYS_UPGRADE, _('Always run pip install --upgrade')),
         (SKIP_SUBMODULES, _('Skip git submodule checkout')),
-        (DONT_OVERWRITE_SPHINX_CONTEXT, _(
-            'Do not overwrite context vars in conf.py with Read the Docs context')),
-        (ALLOW_V2_CONFIG_FILE, _(
-            'Allow to use the v2 of the configuration file')),
-        (MKDOCS_THEME_RTD, _('Use Read the Docs theme for MkDocs as default theme')),
-        (DONT_SHALLOW_CLONE, _(
-            'Do not shallow clone when cloning git repos')),
+        (
+            DONT_OVERWRITE_SPHINX_CONTEXT,
+            _(
+                'Do not overwrite context vars in conf.py with Read the Docs context',
+            ),
+        ),
+        (
+            MKDOCS_THEME_RTD,
+            _('Use Read the Docs theme for MkDocs as default theme'),
+        ),
+        (
+            DONT_SHALLOW_CLONE,
+            _('Do not shallow clone when cloning git repos'),
+        ),
+        (
+            USE_TESTING_BUILD_IMAGE,
+            _('Use Docker image labelled as `testing` to build the docs'),
+        ),
+        (
+            API_LARGE_DATA,
+            _('Try alternative method of posting large data'),
+        ),
+        (
+            SHARE_SPHINX_DOCTREE,
+            _('Use shared directory for doctrees'),
+        ),
+        (
+            DEFAULT_TO_MKDOCS_0_17_3,
+            _('Install mkdocs 0.17.3 by default')
+        ),
     )
 
     projects = models.ManyToManyField(
@@ -1053,9 +1422,7 @@ class Feature(models.Model):
     objects = FeatureQuerySet.as_manager()
 
     def __str__(self):
-        return '{0} feature'.format(
-            self.get_feature_display(),
-        )
+        return '{} feature'.format(self.get_feature_display(),)
 
     def get_feature_display(self):
         """
@@ -1073,7 +1440,7 @@ class EnvironmentVariable(TimeStampedModel, models.Model):
         help_text=_('Name of the environment variable'),
     )
     value = models.CharField(
-        max_length=256,
+        max_length=2048,
         help_text=_('Value of the environment variable'),
     )
     project = models.ForeignKey(
@@ -1081,3 +1448,10 @@ class EnvironmentVariable(TimeStampedModel, models.Model):
         on_delete=models.CASCADE,
         help_text=_('Project where this variable will be used'),
     )
+
+    def __str__(self):
+        return self.name
+
+    def save(self, *args, **kwargs):  # pylint: disable=arguments-differ
+        self.value = shlex_quote(self.value)
+        return super().save(*args, **kwargs)

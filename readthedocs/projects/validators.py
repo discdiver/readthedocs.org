@@ -1,15 +1,15 @@
+# -*- coding: utf-8 -*-
+
 """Validators for projects app."""
 
-# From https://github.com/django/django/pull/3477/files
-from __future__ import absolute_import
 import re
+from urllib.parse import urlparse
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
+from django.core.validators import RegexValidator
 from django.utils.deconstruct import deconstructible
 from django.utils.translation import ugettext_lazy as _
-from django.core.validators import RegexValidator
-from future.backports.urllib.parse import urlparse
 
 
 domain_regex = (
@@ -28,13 +28,13 @@ class DomainNameValidator(RegexValidator):
     def __init__(self, accept_idna=True, **kwargs):
         message = kwargs.get('message')
         self.accept_idna = accept_idna
-        super(DomainNameValidator, self).__init__(**kwargs)
+        super().__init__(**kwargs)
         if not self.accept_idna and message is None:
             self.message = _('Enter a valid domain name value')
 
     def __call__(self, value):
         try:
-            super(DomainNameValidator, self).__call__(value)
+            super().__call__(value)
         except ValidationError as exc:
             if not self.accept_idna:
                 raise
@@ -44,14 +44,14 @@ class DomainNameValidator(RegexValidator):
                 idnavalue = value.encode('idna')
             except UnicodeError:
                 raise exc
-            super(DomainNameValidator, self).__call__(idnavalue)
+            super().__call__(idnavalue)
 
 
 validate_domain_name = DomainNameValidator()
 
 
 @deconstructible
-class RepositoryURLValidator(object):
+class RepositoryURLValidator:
 
     disallow_relative_url = True
 
@@ -59,14 +59,13 @@ class RepositoryURLValidator(object):
     re_git_user = re.compile(r'^[\w]+@.+')
 
     def __call__(self, value):
-        allow_private_repos = getattr(settings, 'ALLOW_PRIVATE_REPOS', False)
         public_schemes = ['https', 'http', 'git', 'ftps', 'ftp']
         private_schemes = ['ssh', 'ssh+git']
         local_schemes = ['file']
         valid_schemes = public_schemes
-        if allow_private_repos:
+        if settings.ALLOW_PRIVATE_REPOS:
             valid_schemes += private_schemes
-        if getattr(settings, 'DEBUG'):  # allow `file://` urls in dev
+        if settings.DEBUG:  # allow `file://` urls in dev
             valid_schemes += local_schemes
         url = urlparse(value)
 
@@ -86,7 +85,7 @@ class RepositoryURLValidator(object):
             return value
         # SSH cloning and ``git@github.com:user/project.git``
         elif self.re_git_user.search(value) or url.scheme in private_schemes:
-            if allow_private_repos:
+            if settings.ALLOW_PRIVATE_REPOS:
                 return value
 
             # Throw a more helpful error message
@@ -99,7 +98,7 @@ class RepositoryURLValidator(object):
 class SubmoduleURLValidator(RepositoryURLValidator):
 
     """
-    A URL validator for repository submodules
+    A URL validator for repository submodules.
 
     If a repository has a relative submodule, the URL path is effectively the
     supermodule's remote ``origin`` URL with the relative path applied.

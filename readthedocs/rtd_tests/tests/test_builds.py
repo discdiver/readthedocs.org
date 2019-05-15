@@ -1,20 +1,17 @@
-from __future__ import (
-    absolute_import,
-    division,
-    print_function,
-    unicode_literals,
-)
+# -*- coding: utf-8 -*-
+import datetime
+import os
 
 import mock
-import os
 from django.test import TestCase
 from django_dynamic_fixture import fixture, get
+from django.utils import timezone
 
 from readthedocs.builds.models import Build, Version
 from readthedocs.doc_builder.config import load_yaml_config
 from readthedocs.doc_builder.environments import LocalBuildEnvironment
 from readthedocs.doc_builder.python_environments import Virtualenv
-from readthedocs.projects.models import Project, EnvironmentVariable
+from readthedocs.projects.models import EnvironmentVariable, Project
 from readthedocs.projects.tasks import UpdateDocsTaskStep
 from readthedocs.rtd_tests.tests.test_config_integration import create_load
 
@@ -32,18 +29,22 @@ class BuildEnvironmentTests(TestCase):
 
     @mock.patch('readthedocs.doc_builder.config.load_config')
     def test_build(self, load_config):
-        '''Test full build'''
+        """Test full build."""
         load_config.side_effect = create_load()
-        project = get(Project,
-                      slug='project-1',
-                      documentation_type='sphinx',
-                      conf_py_file='test_conf.py',
-                      versions=[fixture()])
+        project = get(
+            Project,
+            slug='project-1',
+            documentation_type='sphinx',
+            conf_py_file='test_conf.py',
+            versions=[fixture()],
+        )
         version = project.versions.all()[0]
         self.mocks.configure_mock('api_versions', {'return_value': [version]})
-        self.mocks.configure_mock('api', {
-            'get.return_value': {'downloads': "no_url_here"}
-        })
+        self.mocks.configure_mock(
+            'api', {
+                'get.return_value': {'downloads': 'no_url_here'},
+            },
+        )
         self.mocks.patches['html_build'].stop()
 
         build_env = LocalBuildEnvironment(project=project, version=version, build={})
@@ -51,7 +52,7 @@ class BuildEnvironmentTests(TestCase):
         config = load_yaml_config(version)
         task = UpdateDocsTaskStep(
             build_env=build_env, project=project, python_env=python_env,
-            version=version, config=config
+            version=version, config=config,
         )
         task.build_docs()
 
@@ -63,15 +64,17 @@ class BuildEnvironmentTests(TestCase):
 
     @mock.patch('readthedocs.doc_builder.config.load_config')
     def test_build_respects_pdf_flag(self, load_config):
-        '''Build output format control'''
+        """Build output format control."""
         load_config.side_effect = create_load()
-        project = get(Project,
-                      slug='project-1',
-                      documentation_type='sphinx',
-                      conf_py_file='test_conf.py',
-                      enable_pdf_build=True,
-                      enable_epub_build=False,
-                      versions=[fixture()])
+        project = get(
+            Project,
+            slug='project-1',
+            documentation_type='sphinx',
+            conf_py_file='test_conf.py',
+            enable_pdf_build=True,
+            enable_epub_build=False,
+            versions=[fixture()],
+        )
         version = project.versions.all()[0]
 
         build_env = LocalBuildEnvironment(project=project, version=version, build={})
@@ -79,7 +82,7 @@ class BuildEnvironmentTests(TestCase):
         config = load_yaml_config(version)
         task = UpdateDocsTaskStep(
             build_env=build_env, project=project, python_env=python_env,
-            version=version, config=config
+            version=version, config=config,
         )
 
         task.build_docs()
@@ -99,20 +102,20 @@ class BuildEnvironmentTests(TestCase):
             documentation_type='mkdocs',
             enable_pdf_build=True,
             enable_epub_build=True,
-            versions=[fixture()]
+            versions=[fixture()],
         )
         version = project.versions.all().first()
 
         build_env = LocalBuildEnvironment(
             project=project,
             version=version,
-            build={}
+            build={},
         )
         python_env = Virtualenv(version=version, build_env=build_env)
         config = load_yaml_config(version)
         task = UpdateDocsTaskStep(
             build_env=build_env, project=project, python_env=python_env,
-            version=version, config=config
+            version=version, config=config,
         )
 
         task.build_docs()
@@ -126,15 +129,17 @@ class BuildEnvironmentTests(TestCase):
 
     @mock.patch('readthedocs.doc_builder.config.load_config')
     def test_build_respects_epub_flag(self, load_config):
-        '''Test build with epub enabled'''
+        """Test build with epub enabled."""
         load_config.side_effect = create_load()
-        project = get(Project,
-                      slug='project-1',
-                      documentation_type='sphinx',
-                      conf_py_file='test_conf.py',
-                      enable_pdf_build=False,
-                      enable_epub_build=True,
-                      versions=[fixture()])
+        project = get(
+            Project,
+            slug='project-1',
+            documentation_type='sphinx',
+            conf_py_file='test_conf.py',
+            enable_pdf_build=False,
+            enable_epub_build=True,
+            versions=[fixture()],
+        )
         version = project.versions.all()[0]
 
         build_env = LocalBuildEnvironment(project=project, version=version, build={})
@@ -142,7 +147,7 @@ class BuildEnvironmentTests(TestCase):
         config = load_yaml_config(version)
         task = UpdateDocsTaskStep(
             build_env=build_env, project=project, python_env=python_env,
-            version=version, config=config
+            version=version, config=config,
         )
         task.build_docs()
 
@@ -154,15 +159,17 @@ class BuildEnvironmentTests(TestCase):
 
     @mock.patch('readthedocs.doc_builder.config.load_config')
     def test_build_respects_yaml(self, load_config):
-        '''Test YAML build options'''
+        """Test YAML build options."""
         load_config.side_effect = create_load({'formats': ['epub']})
-        project = get(Project,
-                      slug='project-1',
-                      documentation_type='sphinx',
-                      conf_py_file='test_conf.py',
-                      enable_pdf_build=False,
-                      enable_epub_build=False,
-                      versions=[fixture()])
+        project = get(
+            Project,
+            slug='project-1',
+            documentation_type='sphinx',
+            conf_py_file='test_conf.py',
+            enable_pdf_build=False,
+            enable_epub_build=False,
+            versions=[fixture()],
+        )
         version = project.versions.all()[0]
 
         build_env = LocalBuildEnvironment(project=project, version=version, build={})
@@ -171,7 +178,7 @@ class BuildEnvironmentTests(TestCase):
         config = load_yaml_config(version)
         task = UpdateDocsTaskStep(
             build_env=build_env, project=project, python_env=python_env,
-            version=version, config=config
+            version=version, config=config,
         )
         task.build_docs()
 
@@ -183,19 +190,21 @@ class BuildEnvironmentTests(TestCase):
 
     @mock.patch('readthedocs.doc_builder.config.load_config')
     def test_build_pdf_latex_failures(self, load_config):
-        '''Build failure if latex fails'''
+        """Build failure if latex fails."""
 
         load_config.side_effect = create_load()
         self.mocks.patches['html_build'].stop()
         self.mocks.patches['pdf_build'].stop()
 
-        project = get(Project,
-                      slug='project-1',
-                      documentation_type='sphinx',
-                      conf_py_file='test_conf.py',
-                      enable_pdf_build=True,
-                      enable_epub_build=False,
-                      versions=[fixture()])
+        project = get(
+            Project,
+            slug='project-1',
+            documentation_type='sphinx',
+            conf_py_file='test_conf.py',
+            enable_pdf_build=True,
+            enable_epub_build=False,
+            versions=[fixture()],
+        )
         version = project.versions.all()[0]
         assert project.conf_dir() == '/tmp/rtd'
 
@@ -204,7 +213,7 @@ class BuildEnvironmentTests(TestCase):
         config = load_yaml_config(version)
         task = UpdateDocsTaskStep(
             build_env=build_env, project=project, python_env=python_env,
-            version=version, config=config
+            version=version, config=config,
         )
 
         # Mock out the separate calls to Popen using an iterable side_effect
@@ -216,10 +225,13 @@ class BuildEnvironmentTests(TestCase):
             ((b'', b''), 0),  # latex
         ]
         mock_obj = mock.Mock()
-        mock_obj.communicate.side_effect = [output for (output, status)
-                                            in returns]
+        mock_obj.communicate.side_effect = [
+            output for (output, status)
+            in returns
+        ]
         type(mock_obj).returncode = mock.PropertyMock(
-            side_effect=[status for (output, status) in returns])
+            side_effect=[status for (output, status) in returns],
+        )
         self.mocks.popen.return_value = mock_obj
 
         with build_env:
@@ -229,19 +241,21 @@ class BuildEnvironmentTests(TestCase):
 
     @mock.patch('readthedocs.doc_builder.config.load_config')
     def test_build_pdf_latex_not_failure(self, load_config):
-        '''Test pass during PDF builds and bad latex failure status code'''
+        """Test pass during PDF builds and bad latex failure status code."""
 
         load_config.side_effect = create_load()
         self.mocks.patches['html_build'].stop()
         self.mocks.patches['pdf_build'].stop()
 
-        project = get(Project,
-                      slug='project-2',
-                      documentation_type='sphinx',
-                      conf_py_file='test_conf.py',
-                      enable_pdf_build=True,
-                      enable_epub_build=False,
-                      versions=[fixture()])
+        project = get(
+            Project,
+            slug='project-2',
+            documentation_type='sphinx',
+            conf_py_file='test_conf.py',
+            enable_pdf_build=True,
+            enable_epub_build=False,
+            versions=[fixture()],
+        )
         version = project.versions.all()[0]
         assert project.conf_dir() == '/tmp/rtd'
 
@@ -250,7 +264,7 @@ class BuildEnvironmentTests(TestCase):
         config = load_yaml_config(version)
         task = UpdateDocsTaskStep(
             build_env=build_env, project=project, python_env=python_env,
-            version=version, config=config
+            version=version, config=config,
         )
 
         # Mock out the separate calls to Popen using an iterable side_effect
@@ -262,10 +276,13 @@ class BuildEnvironmentTests(TestCase):
             ((b'', b''), 0),  # latex
         ]
         mock_obj = mock.Mock()
-        mock_obj.communicate.side_effect = [output for (output, status)
-                                            in returns]
+        mock_obj.communicate.side_effect = [
+            output for (output, status)
+            in returns
+        ]
         type(mock_obj).returncode = mock.PropertyMock(
-            side_effect=[status for (output, status) in returns])
+            side_effect=[status for (output, status) in returns],
+        )
         self.mocks.popen.return_value = mock_obj
 
         with build_env:
@@ -286,7 +303,7 @@ class BuildEnvironmentTests(TestCase):
         build = get(Build)
         version = get(Version, slug='1.8', project=project)
         task = UpdateDocsTaskStep(
-            project=project, version=version, build={'id': build.pk}
+            project=project, version=version, build={'id': build.pk},
         )
         task.setup_vcs = mock.Mock()
         task.run_setup()
@@ -358,13 +375,13 @@ class BuildModelTests(TestCase):
             Build,
             project=self.project,
             version=self.version,
-            config={'version': 1}
+            config={'version': 1},
         )
         build_two = get(
             Build,
             project=self.project,
             version=self.version,
-            config={'version': 2}
+            config={'version': 2},
         )
         build_three = get(
             Build,
@@ -516,3 +533,50 @@ class BuildModelTests(TestCase):
         build_two.save()
         self.assertEqual(build_two._config, {})
         self.assertEqual(build_two.config, {})
+
+    def test_build_is_stale(self):
+        now = timezone.now()
+
+        build_one = get(
+            Build,
+            project=self.project,
+            version=self.version,
+            date=now - datetime.timedelta(minutes=8),
+            state='finished'
+        )
+        build_two = get(
+            Build,
+            project=self.project,
+            version=self.version,
+            date=now - datetime.timedelta(minutes=6),
+            state='triggered'
+        )
+        build_three = get(
+            Build,
+            project=self.project,
+            version=self.version,
+            date=now - datetime.timedelta(minutes=2),
+            state='triggered'
+        )
+
+        self.assertFalse(build_one.is_stale)
+        self.assertTrue(build_two.is_stale)
+        self.assertFalse(build_three.is_stale)
+
+    def test_using_latest_config(self):
+        now = timezone.now()
+
+        build = get(
+            Build,
+            project=self.project,
+            version=self.version,
+            date=now - datetime.timedelta(minutes=8),
+            state='finished',
+        )
+
+        self.assertFalse(build.using_latest_config())
+
+        build.config = {'version': 2}
+        build.save()
+
+        self.assertTrue(build.using_latest_config())

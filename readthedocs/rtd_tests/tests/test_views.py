@@ -1,23 +1,18 @@
 # -*- coding: utf-8 -*-
-from __future__ import (
-    absolute_import,
-    division,
-    print_function,
-    unicode_literals,
-)
+from urllib.parse import urlsplit
 
 import mock
 from django.contrib.auth.models import User
-from django.urls import reverse
 from django.test import TestCase
-from django.utils.six.moves.urllib.parse import urlsplit
+from django.urls import reverse
 from django_dynamic_fixture import get, new
 
 from readthedocs.builds.constants import LATEST
 from readthedocs.builds.models import Build
 from readthedocs.core.permissions import AdminPermission
 from readthedocs.projects.forms import UpdateProjectForm
-from readthedocs.projects.models import ImportedFile, Project
+from readthedocs.projects.models import HTMLFile, Project
+
 
 class Testmaker(TestCase):
 
@@ -55,8 +50,6 @@ class Testmaker(TestCase):
         _ = form.save()
         _ = Project.objects.get(slug='django-kong')
 
-        r = self.client.get('/dashboard/django-kong/versions/', {})
-        self.assertEqual(r.status_code, 200)
         r = self.client.get('/projects/django-kong/builds/')
         self.assertEqual(r.status_code, 200)
         r = self.client.get('/dashboard/django-kong/edit/', {})
@@ -110,10 +103,6 @@ class PrivateViewsAreProtectedTests(TestCase):
         response = self.client.get('/dashboard/pip/version/0.8.1/')
         self.assertRedirectToLogin(response)
 
-    def test_versions(self):
-        response = self.client.get('/dashboard/pip/versions/')
-        self.assertRedirectToLogin(response)
-
     def test_project_delete(self):
         response = self.client.get('/dashboard/pip/delete/')
         self.assertRedirectToLogin(response)
@@ -156,7 +145,7 @@ class PrivateViewsAreProtectedTests(TestCase):
 
     def test_project_translations_delete(self):
         response = self.client.get(
-            '/dashboard/pip/translations/delete/a-translation/'
+            '/dashboard/pip/translations/delete/a-translation/',
         )
         self.assertRedirectToLogin(response)
 
@@ -175,10 +164,10 @@ class RandomPageTests(TestCase):
     def setUp(self):
         self.pip = Project.objects.get(slug='pip')
         self.pip_version = self.pip.versions.all()[0]
-        ImportedFile.objects.create(
+        HTMLFile.objects.create(
             project=self.pip,
             version=self.pip_version,
-            name='File',
+            name='file.html',
             slug='file',
             path='file.html',
             md5='abcdef',
@@ -198,8 +187,8 @@ class RandomPageTests(TestCase):
         response = self.client.get('/random/not-existent/')
         self.assertEqual(response.status_code, 404)
 
-    def test_404_for_with_no_imported_files(self):
-        ImportedFile.objects.all().delete()
+    def test_404_for_with_no_html_files(self):
+        HTMLFile.objects.all().delete()
         response = self.client.get('/random/pip/')
         self.assertEqual(response.status_code, 404)
 
@@ -219,13 +208,13 @@ class SubprojectViewTests(TestCase):
 
     def test_deny_delete_for_non_project_admins(self):
         response = self.client.get(
-            '/dashboard/my-mainproject/subprojects/delete/my-subproject/'
+            '/dashboard/my-mainproject/subprojects/delete/my-subproject/',
         )
         self.assertEqual(response.status_code, 404)
 
         self.assertTrue(
             self.subproject in
-            [r.child for r in self.project.subprojects.all()]
+            [r.child for r in self.project.subprojects.all()],
         )
 
     def test_admins_can_delete_subprojects(self):
@@ -244,7 +233,7 @@ class SubprojectViewTests(TestCase):
         self.assertEqual(response.status_code, 405)
         self.assertTrue(
             self.subproject in
-            [r.child for r in self.project.subprojects.all()]
+            [r.child for r in self.project.subprojects.all()],
         )
         # Test POST
         response = self.client.post(
@@ -253,11 +242,11 @@ class SubprojectViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertTrue(
             self.subproject not in
-            [r.child for r in self.project.subprojects.all()]
+            [r.child for r in self.project.subprojects.all()],
         )
 
     def test_project_admins_can_delete_subprojects_that_they_are_not_admin_of(
-            self
+            self,
     ):
         self.project.users.add(self.user)
         self.assertFalse(AdminPermission.is_admin(self.user, self.subproject))
@@ -268,7 +257,7 @@ class SubprojectViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertTrue(
             self.subproject not in
-            [r.child for r in self.project.subprojects.all()]
+            [r.child for r in self.project.subprojects.all()],
         )
 
 

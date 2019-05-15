@@ -1,15 +1,11 @@
-# -*- coding: utf-8 -*-
-from __future__ import (
-    absolute_import, unicode_literals)
-
 from django.test import TestCase
 
-from readthedocs.restapi.client import DrfJsonSerializer
+from readthedocs.api.v2.client import DrfJsonSerializer
 
 
 class TestDrfJsonSerializer(TestCase):
     data = {
-       'proper': 'json'
+       'proper': 'json',
     }
     serialized_data = '{"proper":"json"}'
 

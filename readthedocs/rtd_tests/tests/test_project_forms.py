@@ -1,12 +1,3 @@
-# -*- coding: utf-8 -*-
-
-from __future__ import (
-    absolute_import,
-    division,
-    print_function,
-    unicode_literals,
-)
-
 import mock
 from django.contrib.auth.models import User
 from django.test import TestCase
@@ -14,7 +5,7 @@ from django.test.utils import override_settings
 from django_dynamic_fixture import get
 from textclassifier.validators import ClassifierValidator
 
-from readthedocs.builds.constants import LATEST
+from readthedocs.builds.constants import LATEST, STABLE
 from readthedocs.builds.models import Version
 from readthedocs.projects.constants import (
     PRIVATE,
@@ -25,13 +16,16 @@ from readthedocs.projects.constants import (
 )
 from readthedocs.projects.exceptions import ProjectSpamError
 from readthedocs.projects.forms import (
+    EmailHookForm,
+    EnvironmentVariableForm,
     ProjectAdvancedForm,
     ProjectBasicsForm,
     ProjectExtraForm,
     TranslationForm,
     UpdateProjectForm,
+    WebHookForm,
 )
-from readthedocs.projects.models import Project
+from readthedocs.projects.models import EnvironmentVariable, Project
 
 
 class TestProjectForms(TestCase):
@@ -166,7 +160,7 @@ class TestProjectForms(TestCase):
     def test_length_of_tags(self):
         data = {
             'documentation_type': 'sphinx',
-            'language': 'en'
+            'language': 'en',
         }
         data['tags'] = '{},{}'.format('a'*50, 'b'*99)
         form = ProjectExtraForm(data)
@@ -175,13 +169,25 @@ class TestProjectForms(TestCase):
         data['tags'] = '{},{}'.format('a'*90, 'b'*100)
         form = ProjectExtraForm(data)
         self.assertTrue(form.is_valid())
-        
+
         data['tags'] = '{},{}'.format('a'*99, 'b'*101)
         form = ProjectExtraForm(data)
         self.assertFalse(form.is_valid())
         self.assertTrue(form.has_error('tags'))
         error_msg = 'Length of each tag must be less than or equal to 100 characters.'
         self.assertDictEqual(form.errors, {'tags': [error_msg]})
+
+    def test_strip_repo_url(self):
+        form = ProjectBasicsForm({
+            'name': 'foo',
+            'repo_type': 'git',
+            'repo': 'https://github.com/rtfd/readthedocs.org/'
+        })
+        self.assertTrue(form.is_valid())
+        self.assertEqual(
+            form.cleaned_data['repo'],
+            'https://github.com/rtfd/readthedocs.org'
+        )
 
 
 class TestProjectAdvancedForm(TestCase):
@@ -195,6 +201,7 @@ class TestProjectAdvancedForm(TestCase):
             active=True,
             privacy_level=PUBLIC,
             identifier='public-1',
+            verbose_name='public-1',
         )
         get(
             Version,
@@ -203,6 +210,7 @@ class TestProjectAdvancedForm(TestCase):
             active=True,
             privacy_level=PUBLIC,
             identifier='public-2',
+            verbose_name='public-2',
         )
         get(
             Version,
@@ -211,6 +219,7 @@ class TestProjectAdvancedForm(TestCase):
             active=False,
             privacy_level=PROTECTED,
             identifier='public-3',
+            verbose_name='public-3',
         )
         get(
             Version,
@@ -218,7 +227,8 @@ class TestProjectAdvancedForm(TestCase):
             slug='public-4',
             active=False,
             privacy_level=PUBLIC,
-            identifier='public/4'
+            identifier='public/4',
+            verbose_name='public/4',
         )
         get(
             Version,
@@ -227,6 +237,7 @@ class TestProjectAdvancedForm(TestCase):
             active=True,
             privacy_level=PRIVATE,
             identifier='private',
+            verbose_name='private',
         )
         get(
             Version,
@@ -235,6 +246,7 @@ class TestProjectAdvancedForm(TestCase):
             active=True,
             privacy_level=PROTECTED,
             identifier='protected',
+            verbose_name='protected',
         )
 
     def test_list_only_active_versions_on_default_version(self):
@@ -242,26 +254,133 @@ class TestProjectAdvancedForm(TestCase):
         # This version is created automatically by the project on save
         self.assertTrue(self.project.versions.filter(slug=LATEST).exists())
         self.assertEqual(
-            set(
+            {
                 slug
                 for slug, _ in form.fields['default_version'].widget.choices
-            ),
+            },
             {'latest', 'public-1', 'public-2', 'private', 'protected'},
         )
 
-    def test_list_all_versions_on_default_branch(self):
+    def test_default_version_field_if_no_active_version(self):
+        project_1 = get(Project)
+        project_1.versions.filter(active=True).update(active=False)
+
+        # No active versions of project exists
+        self.assertFalse(project_1.versions.filter(active=True).exists())
+
+        form = ProjectAdvancedForm(instance=project_1)
+        self.assertTrue(form.fields['default_version'].widget.attrs['readonly'])
+        self.assertEqual(form.fields['default_version'].initial, 'latest')
+
+
+class TestProjectAdvancedFormDefaultBranch(TestCase):
+
+    def setUp(self):
+        self.project = get(Project)
+        user_created_stable_version = get(
+            Version,
+            project=self.project,
+            slug='stable',
+            active=True,
+            privacy_level=PUBLIC,
+            identifier='ab96cbff71a8f40a4340aaf9d12e6c10',
+            verbose_name='stable',
+        )
+        get(
+            Version,
+            project=self.project,
+            slug='public-1',
+            active=True,
+            privacy_level=PUBLIC,
+            identifier='public-1',
+            verbose_name='public-1',
+        )
+        get(
+            Version,
+            project=self.project,
+            slug='private',
+            active=True,
+            privacy_level=PRIVATE,
+            identifier='private',
+            verbose_name='private',
+        )
+        get(
+            Version,
+            project=self.project,
+            slug='protected',
+            active=True,
+            privacy_level=PROTECTED,
+            identifier='protected',
+            verbose_name='protected',
+        )
+
+    def test_list_only_non_auto_generated_versions_on_default_branch(self):
         form = ProjectAdvancedForm(instance=self.project)
         # This version is created automatically by the project on save
-        self.assertTrue(self.project.versions.filter(slug=LATEST).exists())
+        latest = self.project.versions.filter(slug=LATEST)
+        self.assertTrue(latest.exists())
+        # show only the versions that are not auto generated as choices
         self.assertEqual(
-            set(
+            {
                 identifier
                 for identifier, _ in form.fields['default_branch'].widget.choices
-            ),
-            {
-                None, 'master', 'public-1', 'public-2',
-                'public-3', 'public/4', 'protected', 'private'
             },
+            {
+                None, 'stable', 'public-1', 'protected', 'private',
+            },
+        )
+        # Auto generated version `latest` should not be among the choices
+        self.assertNotIn(
+            latest.first().verbose_name,
+            [identifier for identifier, _ in form.fields[
+                'default_branch'].widget.choices],
+        )
+
+    def test_list_user_created_latest_and_stable_versions_on_default_branch(self):
+        self.project.versions.filter(slug=LATEST).first().delete()
+        user_created_latest_version = get(
+            Version,
+            project=self.project,
+            slug='latest',
+            active=True,
+            privacy_level=PUBLIC,
+            identifier='ab96cbff71a8f40a4240aaf9d12e6c10',
+            verbose_name='latest',
+        )
+        form = ProjectAdvancedForm(instance=self.project)
+        # This version is created by the user
+        latest = self.project.versions.filter(slug=LATEST)
+        # This version is created by the user
+        stable = self.project.versions.filter(slug=STABLE)
+
+        self.assertIn(
+            latest.first().verbose_name,
+            [identifier for identifier, _ in form.fields[
+                'default_branch'].widget.choices],
+        )
+        self.assertIn(
+            stable.first().verbose_name,
+            [identifier for identifier, _ in form.fields[
+                'default_branch'].widget.choices],
+        )
+
+    def test_commit_name_not_in_default_branch_choices(self):
+        form = ProjectAdvancedForm(instance=self.project)
+        # This version is created by the user
+        latest = self.project.versions.filter(slug=LATEST)
+        # This version is created by the user
+        stable = self.project.versions.filter(slug=STABLE)
+
+        # `commit_name` can not be used as the value for the choices
+        self.assertNotIn(
+            latest.first().commit_name,
+            [identifier for identifier, _ in form.fields[
+                'default_branch'].widget.choices],
+        )
+        self.assertNotIn(
+            stable.first().commit_name,
+            [identifier for identifier, _ in form.fields[
+                'default_branch'].widget.choices],
         )
 
 
@@ -281,7 +400,7 @@ class TestTranslationForms(TestCase):
 
         self.project_s_fr = self.get_project(
             lang='fr',
-            users=[self.user_b, self.user_a]
+            users=[self.user_b, self.user_a],
         )
 
     def get_project(self, lang, users, **kwargs):
@@ -306,7 +425,7 @@ class TestTranslationForms(TestCase):
         ]
         self.assertEqual(
             {proj_slug for proj_slug, _ in form.fields['project'].choices},
-            {project.slug for project in expected_projects}
+            {project.slug for project in expected_projects},
         )
 
         form = TranslationForm(
@@ -321,7 +440,7 @@ class TestTranslationForms(TestCase):
         ]
         self.assertEqual(
             {proj_slug for proj_slug, _ in form.fields['project'].choices},
-            {project.slug for project in expected_projects}
+            {project.slug for project in expected_projects},
         )
 
     def test_excludes_existing_translations(self):
@@ -342,7 +461,7 @@ class TestTranslationForms(TestCase):
         ]
         self.assertEqual(
             {proj_slug for proj_slug, _ in form.fields['project'].choices},
-            {project.slug for project in expected_projects}
+            {project.slug for project in expected_projects},
         )
 
     def test_user_cant_add_other_user_project(self):
@@ -354,11 +473,11 @@ class TestTranslationForms(TestCase):
         self.assertFalse(form.is_valid())
         self.assertIn(
             'Select a valid choice',
-            ''.join(form.errors['project'])
+            ''.join(form.errors['project']),
         )
         self.assertNotIn(
             self.project_f_ar,
-            [proj_slug for proj_slug, _ in form.fields['project'].choices]
+            [proj_slug for proj_slug, _ in form.fields['project'].choices],
         )
 
     def test_user_cant_add_project_with_same_lang(self):
@@ -370,7 +489,7 @@ class TestTranslationForms(TestCase):
         self.assertFalse(form.is_valid())
         self.assertIn(
             'Both projects can not have the same language (English).',
-            ''.join(form.errors['project'])
+            ''.join(form.errors['project']),
         )
 
     def test_user_cant_add_project_with_same_lang_of_other_translation(self):
@@ -385,7 +504,7 @@ class TestTranslationForms(TestCase):
         self.assertFalse(form.is_valid())
         self.assertIn(
             'This project already has a translation for English.',
-            ''.join(form.errors['project'])
+            ''.join(form.errors['project']),
         )
 
     def test_no_nesting_translation(self):
@@ -400,7 +519,7 @@ class TestTranslationForms(TestCase):
         self.assertFalse(form.is_valid())
         self.assertIn(
             'Select a valid choice',
-            ''.join(form.errors['project'])
+            ''.join(form.errors['project']),
         )
 
     def test_no_nesting_translation_case_2(self):
@@ -415,7 +534,7 @@ class TestTranslationForms(TestCase):
         self.assertFalse(form.is_valid())
         self.assertIn(
             'A project with existing translations can not',
-            ''.join(form.errors['project'])
+            ''.join(form.errors['project']),
         )
 
     def test_not_already_translation(self):
@@ -430,7 +549,7 @@ class TestTranslationForms(TestCase):
         self.assertFalse(form.is_valid())
         self.assertIn(
             'is already a translation',
-            ''.join(form.errors['project'])
+            ''.join(form.errors['project']),
         )
 
     def test_cant_change_language_to_translation_lang(self):
@@ -444,12 +563,12 @@ class TestTranslationForms(TestCase):
                 'documentation_type': 'sphinx',
                 'language': 'en',
             },
-            instance=self.project_a_es
+            instance=self.project_a_es,
         )
         self.assertFalse(form.is_valid())
         self.assertIn(
             'There is already a "en" translation',
-            ''.join(form.errors['language'])
+            ''.join(form.errors['language']),
         )
 
         # Translation tries to change lang
@@ -458,12 +577,12 @@ class TestTranslationForms(TestCase):
                 'documentation_type': 'sphinx',
                 'language': 'es',
             },
-            instance=self.project_b_en
+            instance=self.project_b_en,
         )
         self.assertFalse(form.is_valid())
         self.assertIn(
             'There is already a "es" translation',
-            ''.join(form.errors['language'])
+            ''.join(form.errors['language']),
         )
 
         # Translation tries to change lang
@@ -473,12 +592,12 @@ class TestTranslationForms(TestCase):
                 'documentation_type': 'sphinx',
                 'language': 'br',
             },
-            instance=self.project_b_en
+            instance=self.project_b_en,
         )
         self.assertFalse(form.is_valid())
         self.assertIn(
             'There is already a "br" translation',
-            ''.join(form.errors['language'])
+            ''.join(form.errors['language']),
         )
 
     def test_can_change_language_to_self_lang(self):
@@ -495,7 +614,7 @@ class TestTranslationForms(TestCase):
                 'documentation_type': 'sphinx',
                 'language': 'es',
             },
-            instance=self.project_a_es
+            instance=self.project_a_es,
         )
         self.assertTrue(form.is_valid())
 
@@ -508,6 +627,158 @@ class TestTranslationForms(TestCase):
                 'documentation_type': 'sphinx',
                 'language': 'en',
             },
-            instance=self.project_b_en
+            instance=self.project_b_en,
         )
         self.assertTrue(form.is_valid())
+
+
+class TestNotificationForm(TestCase):
+
+    def setUp(self):
+        self.project = get(Project)
+
+    def test_webhookform(self):
+        self.assertEqual(self.project.webhook_notifications.all().count(), 0)
+
+        data = {
+            'url': 'http://www.example.com/'
+        }
+        form = WebHookForm(data=data, project=self.project)
+        self.assertTrue(form.is_valid())
+        form.save()
+        self.assertEqual(self.project.webhook_notifications.all().count(), 1)
+
+    def test_wrong_inputs_in_webhookform(self):
+        self.assertEqual(self.project.webhook_notifications.all().count(), 0)
+
+        data = {
+            'url': ''
+        }
+        form = WebHookForm(data=data, project=self.project)
+        self.assertFalse(form.is_valid())
+        self.assertDictEqual(form.errors, {'url': ['This field is required.']})
+        self.assertEqual(self.project.webhook_notifications.all().count(), 0)
+
+        data = {
+            'url': 'wrong-url'
+        }
+        form = WebHookForm(data=data, project=self.project)
+        self.assertFalse(form.is_valid())
+        self.assertDictEqual(form.errors, {'url': ['Enter a valid URL.']})
+        self.assertEqual(self.project.webhook_notifications.all().count(), 0)
+
+    def test_emailhookform(self):
+        self.assertEqual(self.project.emailhook_notifications.all().count(), 0)
+
+        data = {
+            'email': 'test@email.com'
+        }
+        form = EmailHookForm(data=data, project=self.project)
+        self.assertTrue(form.is_valid())
+        form.save()
+        self.assertEqual(self.project.emailhook_notifications.all().count(), 1)
+
+    def test_wrong_inputs_in_emailhookform(self):
+        self.assertEqual(self.project.emailhook_notifications.all().count(), 0)
+
+        data = {
+            'email': 'wrong_email@'
+        }
+        form = EmailHookForm(data=data, project=self.project)
+        self.assertFalse(form.is_valid())
+        self.assertDictEqual(form.errors, {'email': ['Enter a valid email address.']})
+        self.assertEqual(self.project.emailhook_notifications.all().count(), 0)
+
+        data = {
+            'email': ''
+        }
+        form = EmailHookForm(data=data, project=self.project)
+        self.assertFalse(form.is_valid())
+        self.assertDictEqual(form.errors, {'email': ['This field is required.']})
+        self.assertEqual(self.project.emailhook_notifications.all().count(), 0)
+
+
+class TestProjectEnvironmentVariablesForm(TestCase):
+
+    def setUp(self):
+        self.project = get(Project)
+
+    def test_use_invalid_names(self):
+        data = {
+            'name': 'VARIABLE WITH SPACES',
+            'value': 'string here',
+        }
+        form = EnvironmentVariableForm(data, project=self.project)
+        self.assertFalse(form.is_valid())
+        self.assertIn(
+            "Variable name can't contain spaces",
+            form.errors['name'],
+        )
+
+        data = {
+            'name': 'READTHEDOCS__INVALID',
+            'value': 'string here',
+        }
+        form = EnvironmentVariableForm(data, project=self.project)
+        self.assertFalse(form.is_valid())
+        self.assertIn(
+            "Variable name can't start with READTHEDOCS",
+            form.errors['name'],
+        )
+
+        data = {
+            'name': 'INVALID_CHAR*',
+            'value': 'string here',
+        }
+        form = EnvironmentVariableForm(data, project=self.project)
+        self.assertFalse(form.is_valid())
+        self.assertIn(
+            'Only letters, numbers and underscore are allowed',
+            form.errors['name'],
+        )
+
+        data = {
+            'name': '__INVALID',
+            'value': 'string here',
+        }
+        form = EnvironmentVariableForm(data, project=self.project)
+        self.assertFalse(form.is_valid())
+        self.assertIn(
+            "Variable name can't start with __ (double underscore)",
+            form.errors['name'],
+        )
+
+        get(EnvironmentVariable, name='EXISTENT_VAR', project=self.project)
+        data = {
+            'name': 'EXISTENT_VAR',
+            'value': 'string here',
+        }
+        form = EnvironmentVariableForm(data, project=self.project)
+        self.assertFalse(form.is_valid())
+        self.assertIn(
+            'There is already a variable with this name for this project',
+            form.errors['name'],
+        )
+
+    def test_create(self):
+        data = {
+            'name': 'MYTOKEN',
+            'value': 'string here',
+        }
+        form = EnvironmentVariableForm(data, project=self.project)
+        form.save()
+
+        self.assertEqual(EnvironmentVariable.objects.count(), 1)
+        self.assertEqual(EnvironmentVariable.objects.first().name, 'MYTOKEN')
+        self.assertEqual(EnvironmentVariable.objects.first().value, "'string here'")
+
+        data = {
+            'name': 'ESCAPED',
+            'value': r'string escaped here: #$\1[]{}\|',
+        }
+        form = EnvironmentVariableForm(data, project=self.project)
+        form.save()
+
+        self.assertEqual(EnvironmentVariable.objects.count(), 2)
+        self.assertEqual(EnvironmentVariable.objects.first().name, 'ESCAPED')
+        self.assertEqual(EnvironmentVariable.objects.first().value, r"'string escaped here: #$\1[]{}\|'")

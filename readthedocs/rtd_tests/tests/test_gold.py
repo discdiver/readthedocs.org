@@ -1,11 +1,11 @@
-from __future__ import absolute_import
+# -*- coding: utf-8 -*-
+from datetime import timedelta
 
-from django.urls import reverse
 from django.test import TestCase
+from django.urls import reverse
+from django_dynamic_fixture import fixture, get
 
-from django_dynamic_fixture import get, fixture
-
-from readthedocs.gold.models import GoldUser, LEVEL_CHOICES
+from readthedocs.gold.models import LEVEL_CHOICES, GoldUser
 from readthedocs.projects.models import Project
 from readthedocs.rtd_tests.utils import create_user
 
@@ -17,7 +17,12 @@ class GoldViewTests(TestCase):
 
         self.project = get(Project, slug='test', users=[fixture(), self.user])
 
-        self.golduser = get(GoldUser, user=self.user, level=LEVEL_CHOICES[0][0])
+        self.golduser = get(
+            GoldUser,
+            user=self.user,
+            level=LEVEL_CHOICES[0][0],
+            pub_date=GoldUser.SPONSOR_PROJECT_CUTOFF - timedelta(days=1),
+        )
 
         self.client.login(username='owner', password='test')
 
@@ -25,6 +30,22 @@ class GoldViewTests(TestCase):
         self.assertEqual(self.golduser.projects.count(), 0)
         resp = self.client.post(reverse('gold_projects'), data={'project': 'test'})
         self.assertEqual(self.golduser.projects.count(), 1)
+        self.assertEqual(resp.status_code, 302)
+
+    def test_adding_projects_after_cutoff(self):
+        user = create_user(username='testuser', password='testtest')
+        self.client.login(username='testuser', password='testtest')
+        after_cutoff_golduser = get(
+            GoldUser,
+            user=user,
+            level=LEVEL_CHOICES[0][0],
+            pub_date=GoldUser.SPONSOR_PROJECT_CUTOFF + timedelta(days=1),
+        )
+        self.assertEqual(after_cutoff_golduser.projects.count(), 0)
+
+        # Ensure no gold project is created
+        resp = self.client.post(reverse('gold_projects'), data={'project': 'test'})
+        self.assertEqual(after_cutoff_golduser.projects.count(), 0)
         self.assertEqual(resp.status_code, 302)
 
     def test_too_many_projects(self):
@@ -36,7 +57,7 @@ class GoldViewTests(TestCase):
         self.assertEqual(resp.status_code, 302)
         resp = self.client.post(reverse('gold_projects'), data={'project': self.project2.slug})
         self.assertFormError(
-            resp, form='form', field=None, errors='You already have the max number of supported projects.'
+            resp, form='form', field=None, errors='You already have the max number of supported projects.',
         )
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(self.golduser.projects.count(), 1)
